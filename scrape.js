@@ -1,141 +1,148 @@
-//This is a program to check the stock of the steam deck
-
-//Packages
 const cheerio = require('cheerio');
 const puppeteer = require('puppeteer');
 require('dotenv').config();
+
+// Twilio configuration
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
 const mySMS = process.env.MY_SMS;
 const twilioSMS = process.env.TWILIO_SMS;
 const client = require('twilio')(accountSid, authToken);
 
-const url = 'https://store.steampowered.com/steamdeck';
+// Configuration constants
+const url = 'https://store.steampowered.com/sale/steamdeckrefurbished/';
+const targetProduct = 'Steam Deck 1TB OLED - Valve Certified Refurbished'; // CHANGE THIS TO THE PRODUCT YOU WANT, THERE IS A LIST ON LINE 51
+const checkInterval = 5 * 60 * 1000; // 5 minutes
 
-const product = {
-	size64: '',
-	stock64: '',
-	size256: '',
-	stock256: '',
-	size512: '',
-	stock512: '',
-	link: '',
-};
-
-//Set interval
-const handle = setInterval(scrape, 300000);
-
-/*
-This function scrapes the Steam website for the stock info of each Steam Deck size.
-It fetches all the stock data before calling the SMS function if it's in stock.
-*/
 async function scrape() {
-	//Fetch all the html data with Puppeteer
-	const browser = await puppeteer.launch({
-		headless: 'new',
-	});
-	const [page] = await browser.pages();
-	await page.goto(url, { timeout: 0 }, { waitUntil: 'networkidle0' });
-	const html = await page.content();
-	await browser.close();
+    let browser = null;
+    try {
+        console.log(`[${new Date().toISOString()}] Checking Steam Deck stock...`);
+        
+        browser = await puppeteer.launch({
+            headless: 'new',
+            args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            defaultViewport: {
+                width: 1920,
+                height: 1080
+            }
+        });
 
-	//Load the html with Cheerio so we can use it
-	const $ = cheerio.load(html);
+        const page = await browser.newPage();
+        
+        // Set a longer navigation timeout
+        await page.setDefaultNavigationTimeout(60000);
+        
+        // Navigate to the page and wait for the content to load
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        
+        // Wait for any dynamic content to load
+        await page.waitForTimeout(5000);
 
-	//Narrow down the html to smaller sections (containers)
-	//Fetch each div box containing a Steam Deck size
-	const container64 = $(
-		'div.reservations_reservation_ctn_15uTq.reservation_ctn'
-	).get(0);
-	const container256 = $(
-		'div.reservations_reservation_ctn_15uTq.reservation_ctn'
-	).get(1);
-	const container512 = $(
-		'div.reservations_reservation_ctn_15uTq.reservation_ctn'
-	).get(2);
+        // Extract product information using page.evaluate()
+        const products = await page.evaluate(() => {
+            // This function runs in the browser context
+            const products = [];
+            
+            // Get all text content from the page
+            const pageText = document.body.textContent || '';
+            
+            // Define known product patterns
+            const knownProducts = [
+                'Steam Deck 512 GB OLED - Valve Certified Refurbished',
+                'Steam Deck 1TB OLED - Valve Certified Refurbished',
+                'Steam Deck 64 GB LCD - Valve Certified Refurbished',
+                'Steam Deck 256 GB LCD - Valve Certified Refurbished',
+                'Steam Deck 512 GB LCD - Valve Certified Refurbished'
+            ];
+            
+            // Look for each known product in the page content
+            knownProducts.forEach(productName => {
+                if (pageText.includes(productName)) {
+                    // Find the closest "Out of stock" or price text
+                    const productSection = pageText.substring(
+                        pageText.indexOf(productName),
+                        pageText.indexOf(productName) + 200
+                    );
+                    
+                    const stockStatus = productSection.includes('Out of stock') 
+                        ? 'Out of stock' 
+                        : 'In Stock';
+                    
+                    // Find price using regex
+                    const priceMatch = productSection.match(/£\d+\.\d{2}/);
+                    const price = priceMatch ? priceMatch[0] : '';
+                    
+                    products.push({
+                        title: productName,
+                        stock: stockStatus,
+                        price: price
+                    });
+                }
+            });
+            
+            return products;
+        });
 
-	const containers = [container64, container256, container512];
+        // Log all found products
+        console.log('\nAll products found:');
+        products.forEach(product => {
+            console.log(`\nTitle: ${product.title}`);
+            console.log(`Stock: ${product.stock}`);
+            console.log(`Price: ${product.price}`);
+        });
 
-	/*
-	This function fetches the size and stock info from each container. It assigns each value
-	in the product object.
-	*/
-	function fetchData(value) {
-		//Fetch the size
-		const size = $(value)
-			.find(
-				'div.bbcodes_Header2_2ZqUv.BB_Header2.eventbbcodeparser_Header2_1SWg2'
-			)
-			.text();
-		//Fetch the stock
-		var stock = $(value)
-			.find(
-				'button.reservations_reservebutton_15UWX.DialogButton._DialogLayout.Secondary.Disabled.Focusable'
-			)
-			.text();
+        // Find our target product
+        const targetProductInfo = products.find(p => p.title === targetProduct);
 
-		//Handling a 'Buy Now!' button
-		if (stock == '') {
-			stock = $(value)
-				.find('button.DialogButton._DialogLayout.Secondary.Focusable')
-				.text();
-		}
+        if (targetProductInfo) {
+            console.log(`\n[${new Date().toISOString()}] Target product status:`, targetProductInfo);
+            
+            if (targetProductInfo.stock !== 'Out of stock') {
+                console.log('\nPRODUCT IN STOCK! Sending SMS alert...');
+                await sendSMS(targetProductInfo);
+                clearInterval(handle);
+            } else {
+                console.log(`\n${targetProduct} is out of stock. Next check in 5 minutes.`);
+            }
+        } else {
+            console.log('\nWarning: Target product not found on page.');
+        }
 
-		//Assign values to product object
-		if (size == '64GB') {
-			product.size64 = size;
-			product.stock64 = stock;
-		} else if (size == '256GB') {
-			product.size256 = size;
-			product.stock256 = stock;
-		} else if (size == '512GB') {
-			product.size512 = size;
-			product.stock512 = stock;
-		}
-	}
-
-	product.link = url;
-
-	containers.forEach(fetchData);
-
-	//If it's in stock, send SMS
-	if (product.size64 == '64GB' && product.stock64 != 'Out of stock') {
-		SMS();
-	} else {
-		//console.log(product);
-		console.log(
-			'Current stock:\n' +
-				product.size64 +
-				' - ' +
-				product.stock64 +
-				'\n' +
-				product.size256 +
-				' - ' +
-				product.stock256 +
-				'\n' +
-				product.size512 +
-				' - ' +
-				product.stock512 +
-				'\n\nNext check in 5 minutes\n'
-		);
-	}
+    } catch (error) {
+        console.error('\nError during scraping:', error);
+    } finally {
+        if (browser) await browser.close();
+    }
 }
 
-/*
-This function sends an SMS via Twillio
-*/
-function SMS() {
-	client.messages
-		.create({
-			body: ` \n\nHOLY MOTHER IT'S IN STOCK\n\n${product.size64} - ${product.stock64}\n${product.link}`,
-			from: twilioSMS,
-			to: mySMS,
-		})
-		.then((message) => {
-			console.log(product);
-			console.log(message);
-			clearInterval(handle);
-		});
+async function sendSMS(product) {
+    try {
+        const messageBody = `Steam Deck Stock Alert!\n\n${product.title}\nStock Status: ${product.stock}\nPrice: ${product.price}\n\nLink: ${url}`;
+        
+        const message = await client.messages.create({
+            body: messageBody,
+            from: twilioSMS,
+            to: mySMS
+        });
+
+        console.log('SMS sent successfully:', message.sid);
+    } catch (error) {
+        console.error('Failed to send SMS:', error);
+    }
 }
 
+// Start monitoring
+let handle = setInterval(scrape, checkInterval);
+console.log(`Starting monitoring for ${targetProduct}`);
+console.log(`Checking every ${checkInterval/1000} seconds`);
+
+// Initial check
 scrape();
+
+// Handle graceful shutdown
+process.on('SIGINT', () => {
+    console.log('\nStopping monitoring...');
+    clearInterval(handle);
+    process.exit();
+});
